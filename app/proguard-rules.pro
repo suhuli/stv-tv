@@ -1,0 +1,1 @@
+-keep class cx.n181.stv.** { *; }

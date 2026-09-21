@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">私人TV</string>
+    <string name="search_hint">输入片名</string>
+    <string name="search">搜索</string>
+    <string name="settings">设置</string>
+    <string name="continue_watching">继续观看</string>
+    <string name="recent_searches">最近搜索</string>
+    <string name="play">播放</string>
+    <string name="favorite">收藏</string>
+    <string name="switch_source">切换资源</string>
+</resources>
