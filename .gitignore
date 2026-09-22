@@ -8,3 +8,7 @@ captures
 .externalNativeBuild
 .cxx
 .kotlin
+
+# 签名文件不入库
+keystore/*.jks
+keystore/keystore.properties

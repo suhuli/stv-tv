@@ -1,8 +1,8 @@
 package cx.n181.stv.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,25 +22,24 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -49,20 +48,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import cx.n181.stv.data.SourceConfig
-import cx.n181.stv.data.VideoSummary
 import cx.n181.stv.StvApp
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import cx.n181.stv.data.SourceStatus
+import cx.n181.stv.data.VideoSummary
 
-private val FocusColor = Color(0xFF4DE1FF)
 private val pinyinLetters = ('A'..'Z').map { it.toString() }
+private val digitKeys = ('0'..'9').map { it.toString() }
 
 @Composable
 fun SearchScreen(
@@ -72,67 +69,17 @@ fun SearchScreen(
 ) {
     val context = LocalContext.current
     val container = remember(context) { (context.applicationContext as StvApp).container }
-    val scope = rememberCoroutineScope()
-    val focusRequester = remember { FocusRequester() }
+    val viewModel: SearchViewModel = viewModel(factory = SearchViewModel.Factory(container))
+    val searchButtonFocus = remember { FocusRequester() }
+    val firstKeyFocus = remember { FocusRequester() }
 
-    var letters by remember { mutableStateOf("") }
-    var query by remember { mutableStateOf(initialQuery) }
-    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
-    var sources by remember { mutableStateOf<List<SourceConfig>>(emptyList()) }
-    var searchHistory by remember { mutableStateOf<List<String>>(emptyList()) }
-    var isSearching by remember { mutableStateOf(false) }
-    val results = remember { mutableStateListOf<VideoSummary>() }
-    val sourceStatuses = remember { mutableStateMapOf<String, String>() }
-    var searchJob by remember { mutableStateOf<Job?>(null) }
-    var initialized by remember { mutableStateOf(false) }
-
-    fun performSearch(keyword: String) {
-        val cleanKeyword = keyword.trim()
-        if (cleanKeyword.isEmpty() || isSearching) return
-
-        searchJob?.cancel()
-        results.clear()
-        sourceStatuses.clear()
-        isSearching = true
-        query = cleanKeyword
-
-        searchJob = scope.launch {
-            val activeSources = sources
-            container.historyStore.saveSearch(cleanKeyword)
-            searchHistory = container.historyStore.loadSearchHistory()
-            container.mediaSearchRepository.search(
-                keyword = cleanKeyword,
-                sources = activeSources,
-                maxConcurrent = 4
-            ) { source, sourceResults, error ->
-                results.addAll(sourceResults)
-                sourceStatuses[source.key] = when {
-                    error != null -> "失败"
-                    sourceResults.isEmpty() -> "无结果"
-                    else -> "完成"
-                }
-            }
-            isSearching = false
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        val config = container.appConfigRepository.load()
-        sources = config.sources.filter { it.enabled }.sortedBy { it.order }
-        searchHistory = container.historyStore.loadSearchHistory()
+    LaunchedEffect(viewModel.initialized) {
+        if (!viewModel.initialized) return@LaunchedEffect
         if (initialQuery.isNotBlank()) {
-            performSearch(initialQuery)
+            viewModel.handleInitialQuery(initialQuery)
+        } else if (viewModel.results.isEmpty()) {
+            runCatching { firstKeyFocus.requestFocus() }
         }
-        initialized = true
-    }
-
-    LaunchedEffect(letters) {
-        if (!initialized || letters.length < 1) {
-            suggestions = emptyList()
-            return@LaunchedEffect
-        }
-        delay(220)
-        suggestions = container.suggestClient.suggest(letters)
     }
 
     Box(
@@ -143,10 +90,11 @@ fun SearchScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 32.dp, vertical = 20.dp)
+                .padding(horizontal = 40.dp, vertical = 24.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.focusGroup()
             ) {
                 TvIconButton(
                     onClick = onBack,
@@ -156,43 +104,73 @@ fun SearchScreen(
                 Spacer(Modifier.width(12.dp))
 
                 OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(focusRequester),
-                    placeholder = { Text("输入中文 / 英文，或选下方候选") },
+                    value = viewModel.query,
+                    onValueChange = { viewModel.onQueryTyped(it) },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("输入片名（支持首拼，如 LLDQ）", fontSize = 16.sp) },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search)
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 18.sp, color = Color.White),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { viewModel.search(viewModel.query) }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = TvFocusColor,
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                        cursorColor = TvFocusColor
+                    )
                 )
 
                 Spacer(Modifier.width(12.dp))
-                TvButton(onClick = { performSearch(query) }) {
-                    Text("搜索")
+                TvButton(
+                    onClick = { viewModel.search(viewModel.query) },
+                    modifier = Modifier.focusRequester(searchButtonFocus)
+                ) {
+                    Text("搜索", fontSize = 16.sp)
                 }
             }
 
             Spacer(Modifier.height(12.dp))
 
-            if (searchHistory.isNotEmpty()) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(searchHistory) { keyword ->
-                        HistoryChip(keyword) { performSearch(keyword) }
+            if (viewModel.suggestions.isNotEmpty()) {
+                Text(
+                    text = "候选片名",
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 14.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp, horizontal = 4.dp),
+                    modifier = Modifier.focusGroup()
+                ) {
+                    items(viewModel.suggestions) { suggestion ->
+                        TvChip(onClick = { viewModel.search(suggestion) }) {
+                            Text(suggestion, fontSize = 15.sp, maxLines = 1)
+                        }
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-            }
-
-            if (suggestions.isNotEmpty()) {
-                Text(
-                    text = "首拼候选",
-                    color = Color.White.copy(alpha = 0.4f),
-                    fontSize = 13.sp
-                )
+            } else if (viewModel.searchHistory.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "最近搜索",
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 14.sp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    TvChip(onClick = { viewModel.clearSearchHistory() }) {
+                        Text("清空", fontSize = 13.sp)
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(suggestions) { suggestion ->
-                        HistoryChip(suggestion) { performSearch(suggestion) }
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp, horizontal = 4.dp),
+                    modifier = Modifier.focusGroup()
+                ) {
+                    items(viewModel.searchHistory) { keyword ->
+                        TvChip(onClick = { viewModel.search(keyword) }) {
+                            Text(keyword, fontSize = 15.sp, maxLines = 1)
+                        }
                     }
                 }
                 Spacer(Modifier.height(10.dp))
@@ -200,82 +178,83 @@ fun SearchScreen(
 
             Row(
                 modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(20.dp)
+                horizontalArrangement = Arrangement.spacedBy(24.dp)
             ) {
+                // 左侧：遥控器键盘
                 Column(
                     modifier = Modifier
                         .width(300.dp)
                         .fillMaxHeight()
+                        .focusGroup()
                 ) {
                     Text(
                         text = "首拼键盘",
                         color = Color.White,
-                        fontSize = 16.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(10.dp))
 
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(6),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f, fill = false),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(4.dp)
                     ) {
                         items(pinyinLetters) { letter ->
                             KeyboardKey(
                                 label = letter,
-                                onClick = {
-                                    letters += letter
-                                    query = letters
-                                }
+                                modifier = if (letter == "A") Modifier.focusRequester(firstKeyFocus) else Modifier,
+                                onClick = { viewModel.appendLetter(letter) }
                             )
+                        }
+                        items(digitKeys) { digit ->
+                            KeyboardKey(label = digit, onClick = { viewModel.appendLetter(digit) })
                         }
                     }
 
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ActionKey("删除", Modifier.weight(1f)) {
-                            if (letters.isNotEmpty()) letters = letters.dropLast(1)
-                            query = letters
-                        }
-                        ActionKey("清空", Modifier.weight(1f)) {
-                            letters = ""
-                            suggestions = emptyList()
-                            query = ""
+                        ActionKey("删除", Modifier.weight(1f)) { viewModel.deleteLetter() }
+                        ActionKey("清空", Modifier.weight(1f)) { viewModel.clearInput() }
+                        ActionKey("搜索", Modifier.weight(1f), highlight = true) {
+                            viewModel.search(viewModel.query)
                         }
                     }
                 }
 
+                // 右侧：结果
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
                 ) {
-                    Text(
-                        text = if (isSearching) {
-                            "正在搜索 ${sourceStatuses.values.count { it != "搜索中" }} / ${sourceStatuses.size} 个源"
-                        } else {
-                            "搜索结果 ${results.size}"
-                        },
-                        color = Color.White.copy(alpha = 0.45f),
-                        fontSize = 13.sp
-                    )
+                    SearchStatusBar(viewModel)
                     Spacer(Modifier.height(10.dp))
 
-                    if (results.isEmpty()) {
-                        Text(
-                            text = if (isSearching) "正在搜索，结果会逐步显示..." else "暂无结果",
-                            color = Color.White.copy(alpha = 0.35f),
-                            fontSize = 14.sp
-                        )
+                    if (viewModel.results.isEmpty()) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = when {
+                                    viewModel.isSearching -> "正在搜索，结果会逐步显示..."
+                                    viewModel.lastKeyword.isNotEmpty() -> "没有找到「${viewModel.lastKeyword}」相关内容\n可以试试换个关键字，或在设置里检查资源源"
+                                    else -> "用左侧键盘输入片名首拼，或直接输入片名后搜索"
+                                },
+                                color = Color.White.copy(alpha = 0.4f),
+                                fontSize = 16.sp,
+                                lineHeight = 24.sp
+                            )
+                        }
                     } else {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(4),
+                            columns = GridCells.Adaptive(minSize = 168.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalArrangement = Arrangement.spacedBy(14.dp),
-                            contentPadding = PaddingValues(bottom = 16.dp)
+                            contentPadding = PaddingValues(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 24.dp),
+                            modifier = Modifier.focusGroup()
                         ) {
-                            items(results) { item ->
+                            items(viewModel.results, key = { it.key }) { item ->
                                 SearchResultCard(item) {
                                     onOpenDetail(item.sourceKey, item.videoId)
                                 }
@@ -289,63 +268,59 @@ fun SearchScreen(
 }
 
 @Composable
-private fun HistoryChip(label: String, onClick: () -> Unit) {
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(999.dp)
+private fun SearchStatusBar(viewModel: SearchViewModel) {
+    val total = viewModel.sourceStatuses.size
+    val finished = viewModel.finishedSourceCount
+    val failed = viewModel.sourceStatuses.values.count { it is SourceStatus.Failed }
 
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .onFocusChanged { focused = it.isFocused }
-            .scale(if (focused) 1.05f else 1f),
-        shape = shape,
-        color = when {
-            focused -> Color.White.copy(alpha = 0.15f)
-            else -> Color.White.copy(alpha = 0.08f)
-        },
-        contentColor = Color.White.copy(alpha = 0.7f)
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            fontSize = 13.sp,
-            maxLines = 1
-        )
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = when {
+                    viewModel.isSearching -> "正在搜索  $finished / $total 个源  ·  已找到 ${viewModel.results.size} 条"
+                    total > 0 -> "搜索完成  ${viewModel.results.size} 条结果  ·  $total 个源" +
+                        if (failed > 0) "（$failed 个源失败）" else ""
+                    else -> "搜索结果"
+                },
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 14.sp
+            )
+        }
+        if (viewModel.isSearching && total > 0) {
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { finished.toFloat() / total },
+                modifier = Modifier.fillMaxWidth().height(3.dp),
+                color = TvFocusColor,
+                trackColor = Color.White.copy(alpha = 0.1f)
+            )
+        }
     }
 }
 
 @Composable
 private fun KeyboardKey(
     label: String,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(10.dp)
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .aspectRatio(1.2f)
+            .aspectRatio(1.15f)
             .onFocusChanged { focused = it.isFocused }
-            .scale(if (focused) 1.1f else 1f)
+            .tvFocusFrame(focused, shape, scale = 1.1f, borderWidth = 2.dp)
             .clip(shape)
-            .border(
-                width = if (focused) 2.dp else 0.dp,
-                color = if (focused) FocusColor else Color.Transparent,
-                shape = shape
-            )
-            .background(
-                when {
-                    focused -> Color.White.copy(alpha = 0.15f)
-                    else -> Color.White.copy(alpha = 0.07f)
-                }
-            )
+            .background(if (focused) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.07f))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            color = if (focused) Color.White else Color.White.copy(alpha = 0.7f),
+            color = if (focused) Color.White else Color.White.copy(alpha = 0.75f),
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold
         )
@@ -356,6 +331,7 @@ private fun KeyboardKey(
 private fun ActionKey(
     label: String,
     modifier: Modifier = Modifier,
+    highlight: Boolean = false,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -363,18 +339,14 @@ private fun ActionKey(
 
     Box(
         modifier = modifier
-            .height(44.dp)
+            .height(46.dp)
             .onFocusChanged { focused = it.isFocused }
-            .scale(if (focused) 1.05f else 1f)
+            .tvFocusFrame(focused, shape, scale = 1.05f, borderWidth = 2.dp)
             .clip(shape)
-            .border(
-                width = if (focused) 2.dp else 0.dp,
-                color = if (focused) FocusColor else Color.Transparent,
-                shape = shape
-            )
             .background(
                 when {
-                    focused -> Color.White.copy(alpha = 0.15f)
+                    highlight -> Color(0xFF23ADE5).copy(alpha = if (focused) 1f else 0.75f)
+                    focused -> Color.White.copy(alpha = 0.18f)
                     else -> Color.White.copy(alpha = 0.07f)
                 }
             )
@@ -383,8 +355,9 @@ private fun ActionKey(
     ) {
         Text(
             text = label,
-            color = if (focused) Color.White else Color.White.copy(alpha = 0.6f),
-            fontSize = 14.sp
+            color = if (focused || highlight) Color.White else Color.White.copy(alpha = 0.65f),
+            fontSize = 15.sp,
+            fontWeight = if (highlight) FontWeight.Bold else FontWeight.Normal
         )
     }
 }
@@ -400,15 +373,10 @@ private fun SearchResultCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(280.dp)
+            .aspectRatio(0.68f)
             .onFocusChanged { focused = it.isFocused }
-            .scale(if (focused) 1.04f else 1f)
+            .tvFocusFrame(focused, shape, scale = 1.05f)
             .clip(shape)
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = if (focused) FocusColor else Color.Transparent,
-                shape = shape
-            )
             .background(Color(0xFF1A1D24))
             .clickable(onClick = onClick)
     ) {
@@ -427,10 +395,28 @@ private fun SearchResultCard(
                     Brush.verticalGradient(
                         0f to Color.Transparent,
                         0.5f to Color.Transparent,
-                        1f to Color.Black.copy(alpha = 0.88f)
+                        1f to Color.Black.copy(alpha = 0.9f)
                     )
                 )
         )
+        if (!item.remarks.isNullOrBlank()) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+            ) {
+                Text(
+                    text = item.remarks,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                )
+            }
+        }
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -439,13 +425,20 @@ private fun SearchResultCard(
             Text(
                 text = item.title,
                 color = Color.White,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = listOfNotNull(item.year, item.typeName).joinToString(" · "),
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 12.sp,
                 maxLines = 1
             )
             Text(
-                text = listOfNotNull(item.year, item.sourceName).joinToString(" · "),
-                color = Color.White.copy(alpha = 0.55f),
+                text = item.sourceName,
+                color = TvFocusColor.copy(alpha = 0.9f),
                 fontSize = 12.sp,
                 maxLines = 1
             )

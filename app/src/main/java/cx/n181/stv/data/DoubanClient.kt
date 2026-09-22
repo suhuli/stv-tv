@@ -1,13 +1,10 @@
 package cx.n181.stv.data
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
-import java.util.concurrent.TimeUnit
 
 @Serializable
 data class DoubanSubject(
@@ -16,15 +13,14 @@ data class DoubanSubject(
     val rate: String = "",
     val cover: String = "",
     val url: String = "",
-    val isNew: Boolean = false
-)
+    @Serializable(with = LenientStringSerializer::class) val isNew: String = "false"
+) {
+    val isNewFlag: Boolean get() = isNew.equals("true", ignoreCase = true)
+}
 
 class DoubanClient(
-    private val proxyBaseUrl: String,
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val defaultProxyBaseUrl: String,
+    private val httpClient: OkHttpClient = HttpClients.shared
 ) {
     private data class CacheEntry(
         val items: List<DoubanSubject>,
@@ -37,18 +33,25 @@ class DoubanClient(
         coerceInputValues = true
     }
     private val cache = mutableMapOf<String, CacheEntry>()
-    private val cacheTtlMs = 10L * 60 * 1000
+    private val cacheTtlMs = 30L * 60 * 1000
+
+    /** 远程配置可以通过 proxyUrl 覆盖代理地址；为空时用内置地址。 */
+    @Volatile
+    var proxyBaseUrl: String = defaultProxyBaseUrl
+        set(value) {
+            field = value.ifBlank { defaultProxyBaseUrl }
+        }
 
     suspend fun recommend(
         type: String,
         tag: String,
         page: Int = 0,
         pageSize: Int = 24
-    ): List<DoubanSubject> = withContext(Dispatchers.IO) {
+    ): List<DoubanSubject> {
         val cacheKey = "$type:$tag:$page:$pageSize"
         val cached = synchronized(cache) { cache[cacheKey] }
         if (cached != null && System.currentTimeMillis() - cached.timestamp < cacheTtlMs) {
-            return@withContext cached.items
+            return cached.items
         }
 
         val doubanUrl = buildString {
@@ -64,21 +67,21 @@ class DoubanClient(
 
         val request = Request.Builder()
             .url(proxyUrl(doubanUrl))
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11; SHIELD Android TV)")
+            .header("User-Agent", HttpClients.TV_USER_AGENT)
             .get()
             .build()
 
-        httpClient.newCall(request).execute().use { response ->
+        val body = httpClient.newCall(request).await().use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException("豆瓣接口返回 ${response.code}")
             }
-            val body = response.body?.string().orEmpty()
-            val result = json.decodeFromString(DoubanResponse.serializer(), body)
-            synchronized(cache) {
-                cache[cacheKey] = CacheEntry(result.subjects, System.currentTimeMillis())
-            }
-            result.subjects
+            response.body?.string().orEmpty()
         }
+        val result = json.decodeFromString(DoubanResponse.serializer(), body)
+        synchronized(cache) {
+            cache[cacheKey] = CacheEntry(result.subjects, System.currentTimeMillis())
+        }
+        return result.subjects
     }
 
     fun proxyImageUrl(url: String): String {

@@ -12,6 +12,16 @@ import androidx.navigation.navArgument
 fun AppNavHost() {
     val navController = rememberNavController()
 
+    fun openPlayer(sourceKey: String, videoId: String, episodeIndex: Int, startPositionMs: Long) {
+        navController.navigate(
+            "player/${Uri.encode(sourceKey)}/${Uri.encode(videoId)}/$episodeIndex/${startPositionMs.coerceAtLeast(0L)}"
+        )
+    }
+
+    fun openDetail(sourceKey: String, videoId: String) {
+        navController.navigate("detail/${Uri.encode(sourceKey)}/${Uri.encode(videoId)}")
+    }
+
     NavHost(
         navController = navController,
         startDestination = "home"
@@ -23,17 +33,17 @@ fun AppNavHost() {
                 onSearchTitle = { title ->
                     navController.navigate("search?query=${Uri.encode(title)}")
                 },
-                onOpenDetail = { sourceKey, videoId ->
-                    navController.navigate("detail/$sourceKey/$videoId")
+                onOpenDetail = { sourceKey, videoId -> openDetail(sourceKey, videoId) },
+                onResume = { item ->
+                    // 继续观看：直接进播放器并从上次位置续播，不再经过详情页
+                    openPlayer(item.sourceKey, item.videoId, item.episodeIndex, item.positionMs)
                 }
             )
         }
 
         composable("search") {
             SearchScreen(
-                onOpenDetail = { sourceKey, videoId ->
-                    navController.navigate("detail/$sourceKey/$videoId")
-                },
+                onOpenDetail = { sourceKey, videoId -> openDetail(sourceKey, videoId) },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -49,9 +59,7 @@ fun AppNavHost() {
         ) { entry ->
             SearchScreen(
                 initialQuery = entry.arguments?.getString("query").orEmpty(),
-                onOpenDetail = { sourceKey, videoId ->
-                    navController.navigate("detail/$sourceKey/$videoId")
-                },
+                onOpenDetail = { sourceKey, videoId -> openDetail(sourceKey, videoId) },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -70,9 +78,7 @@ fun AppNavHost() {
                 sourceKey = sourceKey,
                 videoId = videoId,
                 onPlay = { episodeIndex, startPositionMs ->
-                    navController.navigate(
-                        "player/$sourceKey/$videoId/$episodeIndex/$startPositionMs"
-                    )
+                    openPlayer(sourceKey, videoId, episodeIndex, startPositionMs)
                 },
                 onBack = { navController.popBackStack() }
             )

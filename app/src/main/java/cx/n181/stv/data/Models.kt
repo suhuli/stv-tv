@@ -15,7 +15,7 @@ data class AppConfig(
 
 @Serializable
 data class SearchConfig(
-    val concurrency: Int = 4,
+    val concurrency: Int = 6,
     val timeoutMs: Long = 10_000L,
     val defaultMaxPages: Int = 1
 )
@@ -51,18 +51,27 @@ data class VideoSummary(
     val year: String? = null,
     val typeName: String? = null,
     val remarks: String? = null
-)
+) {
+    val key: String get() = "$sourceKey:$videoId"
+}
 
 data class VideoDetail(
     val summary: VideoSummary,
     val description: String? = null,
     val playGroups: List<PlayGroup> = emptyList()
-)
+) {
+    val allEpisodes: List<Episode> get() = playGroups.flatMap { it.episodes }
+    fun episodeAt(index: Int): Episode? = allEpisodes.firstOrNull { it.index == index }
+    fun groupOf(episodeIndex: Int): Int =
+        playGroups.indexOfFirst { group -> group.episodes.any { it.index == episodeIndex } }.coerceAtLeast(0)
+}
 
 data class PlayGroup(
     val name: String,
     val episodes: List<Episode>
-)
+) {
+    val directPlayableCount: Int get() = episodes.count { looksDirectlyPlayable(it.url) }
+}
 
 data class Episode(
     val index: Int,
@@ -82,10 +91,20 @@ data class HistoryItem(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val updatedAt: Long = System.currentTimeMillis()
-)
+) {
+    val progress: Float
+        get() = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+}
 
-enum class PlayerEngine {
-    EXO,
-    IJK,
-    SYSTEM
+enum class PlayerEngine(val label: String) {
+    EXO("ExoPlayer"),
+    IJK("IJKPlayer"),
+    SYSTEM("系统播放器")
+}
+
+/** 搜索时每个源的状态，用于进度展示。 */
+sealed class SourceStatus {
+    data object Pending : SourceStatus()
+    data class Done(val count: Int, val elapsedMs: Long) : SourceStatus()
+    data class Failed(val reason: String, val elapsedMs: Long) : SourceStatus()
 }
