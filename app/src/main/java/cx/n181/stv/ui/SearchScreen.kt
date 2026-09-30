@@ -1,6 +1,7 @@
 package cx.n181.stv.ui
 
 import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -56,6 +58,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import cx.n181.stv.StvApp
 import cx.n181.stv.data.SourceStatus
+import cx.n181.stv.data.HealthStatus
+import cx.n181.stv.data.SearchGroup
 import cx.n181.stv.data.VideoSummary
 
 private val pinyinLetters = ('A'..'Z').map { it.toString() }
@@ -72,6 +76,17 @@ fun SearchScreen(
     val viewModel: SearchViewModel = viewModel(factory = SearchViewModel.Factory(container))
     val searchButtonFocus = remember { FocusRequester() }
     val firstKeyFocus = remember { FocusRequester() }
+    val pickerFocus = remember { FocusRequester() }
+    // 点了一张多源卡片后弹出的选源列表
+    var pickerGroup by remember { mutableStateOf<SearchGroup?>(null) }
+
+    BackHandler(enabled = pickerGroup != null) { pickerGroup = null }
+    LaunchedEffect(pickerGroup) {
+        if (pickerGroup != null) {
+            kotlinx.coroutines.delay(30)
+            runCatching { pickerFocus.requestFocus() }
+        }
+    }
 
     LaunchedEffect(viewModel.initialized) {
         if (!viewModel.initialized) return@LaunchedEffect
@@ -254,12 +269,143 @@ fun SearchScreen(
                             contentPadding = PaddingValues(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 24.dp),
                             modifier = Modifier.focusGroup()
                         ) {
-                            items(viewModel.results, key = { it.key }) { item ->
-                                SearchResultCard(item) {
-                                    onOpenDetail(item.sourceKey, item.videoId)
+                            items(viewModel.groups, key = { it.normalizedTitle }) { group ->
+                                SearchResultCard(group) {
+                                    if (group.items.size == 1) {
+                                        val only = group.primary
+                                        onOpenDetail(only.sourceKey, only.videoId)
+                                    } else {
+                                        pickerGroup = group
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // 选源列表
+        pickerGroup?.let { group ->
+            SourcePickerOverlay(
+                group = group,
+                healthLabel = { key -> container.sourceHealthRepository.label(key) },
+                healthStatus = { key -> container.sourceHealthRepository.status(key) },
+                firstFocus = pickerFocus,
+                onPick = { item ->
+                    pickerGroup = null
+                    onOpenDetail(item.sourceKey, item.videoId)
+                },
+                onDismiss = { pickerGroup = null }
+            )
+        }
+    }
+}
+
+/**
+ * 选源列表（和网站「切换资源」弹窗一致）：同一部片的所有源，按 可播(延迟低优先) > 未巡检 > 海外受限 > 异常 排好，
+ * 每行显示 源名 · 巡检状态 · 备注；第一个可播的源标「推荐」。
+ */
+@Composable
+private fun SourcePickerOverlay(
+    group: SearchGroup,
+    healthLabel: (String) -> String,
+    healthStatus: (String) -> HealthStatus,
+    firstFocus: FocusRequester,
+    onPick: (VideoSummary) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val recommendedKey = group.items.firstOrNull { healthStatus(it.sourceKey) == HealthStatus.OK }?.key
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f))
+            .clickable(onClick = onDismiss),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.62f)
+                .fillMaxHeight(0.82f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF181B22))
+                .clickable(enabled = false) {}
+                .padding(horizontal = 28.dp, vertical = 22.dp)
+        ) {
+            Text(
+                text = group.primary.title,
+                color = Color.White,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "${group.items.size} 个源收录了这部片，选一个播放。「海外受限」只是巡检节点在海外拉不到片，国内一般能正常播；返回键关闭",
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 13.sp,
+                maxLines = 2
+            )
+            Spacer(Modifier.height(14.dp))
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .focusGroup()
+            ) {
+                items(group.items, key = { it.key }) { item ->
+                    val status = healthStatus(item.sourceKey)
+                    val statusColor = when (status) {
+                        HealthStatus.OK -> Color(0xFF6EE7B7)
+                        HealthStatus.API_ONLY -> Color(0xFFFCD34D)
+                        HealthStatus.DOWN -> Color(0xFFF87171)
+                        HealthStatus.UNKNOWN -> Color.White.copy(alpha = 0.5f)
+                    }
+                    TvOutlinedButton(
+                        onClick = { onPick(item) },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = if (item === group.items.first()) {
+                            Modifier.fillMaxWidth().focusRequester(firstFocus)
+                        } else {
+                            Modifier.fillMaxWidth()
+                        }
+                    ) {
+                        Text(
+                            text = item.sourceName,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.width(170.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = healthLabel(item.sourceKey),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = statusColor,
+                            modifier = Modifier.width(120.dp),
+                            maxLines = 1
+                        )
+                        if (item.key == recommendedKey) {
+                            Text(
+                                text = "推荐",
+                                fontSize = 13.sp,
+                                color = Color(0xFF93C5FD),
+                                modifier = Modifier.width(48.dp)
+                            )
+                        } else {
+                            Spacer(Modifier.width(48.dp))
+                        }
+                        Text(
+                            text = listOfNotNull(item.year, item.remarks).joinToString(" · "),
+                            fontSize = 14.sp,
+                            color = Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -277,8 +423,8 @@ private fun SearchStatusBar(viewModel: SearchViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = when {
-                    viewModel.isSearching -> "正在搜索  $finished / $total 个源  ·  已找到 ${viewModel.results.size} 条"
-                    total > 0 -> "搜索完成  ${viewModel.results.size} 条结果  ·  $total 个源" +
+                    viewModel.isSearching -> "正在搜索  $finished / $total 个源  ·  已找到 ${viewModel.groups.size} 部"
+                    total > 0 -> "搜索完成  ${viewModel.groups.size} 部影片（${viewModel.results.size} 条收录）  ·  $total 个源" +
                         if (failed > 0) "（$failed 个源失败）" else ""
                     else -> "搜索结果"
                 },
@@ -364,9 +510,10 @@ private fun ActionKey(
 
 @Composable
 private fun SearchResultCard(
-    item: VideoSummary,
+    group: SearchGroup,
     onClick: () -> Unit
 ) {
+    val item = group.primary
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(14.dp)
 
@@ -380,9 +527,9 @@ private fun SearchResultCard(
             .background(Color(0xFF1A1D24))
             .clickable(onClick = onClick)
     ) {
-        if (item.poster != null) {
+        if (group.poster != null) {
             AsyncImage(
-                model = item.poster,
+                model = group.poster,
                 contentDescription = item.title,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -399,7 +546,7 @@ private fun SearchResultCard(
                     )
                 )
         )
-        if (!item.remarks.isNullOrBlank()) {
+        if (!group.remarks.isNullOrBlank()) {
             Surface(
                 color = Color.Black.copy(alpha = 0.6f),
                 shape = RoundedCornerShape(6.dp),
@@ -408,7 +555,7 @@ private fun SearchResultCard(
                     .padding(8.dp)
             ) {
                 Text(
-                    text = item.remarks,
+                    text = group.remarks.orEmpty(),
                     color = Color.White,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -437,7 +584,7 @@ private fun SearchResultCard(
                 maxLines = 1
             )
             Text(
-                text = item.sourceName,
+                text = if (group.sourceCount > 1) "${group.sourceCount} 个源" else item.sourceName,
                 color = TvFocusColor.copy(alpha = 0.9f),
                 fontSize = 12.sp,
                 maxLines = 1

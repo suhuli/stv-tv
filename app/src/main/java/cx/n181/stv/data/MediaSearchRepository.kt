@@ -68,6 +68,30 @@ class MediaSearchRepository(
 
     companion object {
         /**
+         * 把已排好序的结果按归一化片名聚合；组的顺序 = 组内第一条在 ranked 里的位置，
+         * 组内按 巡检可播（延迟低优先）> 未巡检 > 海外受限 > 异常，再按源 order。
+         */
+        fun group(
+            ranked: List<VideoSummary>,
+            sourceOrder: Map<String, Int>,
+            health: SourceHealthRepository?
+        ): List<SearchGroup> {
+            val grouped = LinkedHashMap<String, MutableList<VideoSummary>>()
+            ranked.forEach { item ->
+                val key = normalizeTitle(item.title).ifEmpty { item.key }
+                grouped.getOrPut(key) { mutableListOf() }.add(item)
+            }
+            return grouped.map { (key, items) ->
+                val sorted = if (health != null) {
+                    health.sortByHealth(items, key = { it.sourceKey }, order = { sourceOrder[it.sourceKey] ?: Int.MAX_VALUE })
+                } else {
+                    items.sortedBy { sourceOrder[it.sourceKey] ?: Int.MAX_VALUE }
+                }
+                SearchGroup(normalizedTitle = key, items = sorted)
+            }
+        }
+
+        /**
          * 结果排序：完全匹配 > 前缀匹配 > 包含 > 其它；同级按源的 order 排；并按 源:ID 去重。
          * 原实现按"哪个源先返回"排，每次搜索顺序都不一样，电视上很难找。
          */

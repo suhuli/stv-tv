@@ -49,8 +49,11 @@ class HistoryStore(private val context: Context) {
     suspend fun saveHistory(item: HistoryItem) {
         context.stvDataStore.edit { preferences ->
             val current = decodeHistory(preferences[historyKey])
+            // 同一部片只保留一条（换源后不再在「继续观看」里出现两张同名卡），按归一化片名去重
+            val titleKey = normalizeTitle(item.title)
             val merged = listOf(item) + current.filterNot {
-                it.sourceKey == item.sourceKey && it.videoId == item.videoId
+                (it.sourceKey == item.sourceKey && it.videoId == item.videoId) ||
+                    (titleKey.isNotEmpty() && normalizeTitle(it.title) == titleKey)
             }
             val limited = merged.sortedByDescending { it.updatedAt }.take(MAX_HISTORY)
             preferences[historyKey] = json.encodeToString(historySerializer, limited)
@@ -98,8 +101,14 @@ class HistoryStore(private val context: Context) {
 
     private fun decodeHistory(raw: String?): List<HistoryItem> {
         if (raw.isNullOrBlank()) return emptyList()
-        return runCatching {
+        val list = runCatching {
             json.decodeFromString(historySerializer, raw)
         }.getOrDefault(emptyList())
+        // 老数据里可能已有同名重复，读取时也按片名去重（保留最近一条）
+        val seen = HashSet<String>()
+        return list.sortedByDescending { it.updatedAt }.filter { item ->
+            val key = normalizeTitle(item.title).ifEmpty { "${item.sourceKey}:${item.videoId}" }
+            seen.add(key)
+        }
     }
 }

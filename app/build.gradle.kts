@@ -26,8 +26,8 @@ android {
         applicationId = "cx.n181.stv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.1"
+        versionCode = 10
+        versionName = "0.3.2"
         // 只保留电视盒子实际使用的 ABI，ijkplayer 只提供这两种 so
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")

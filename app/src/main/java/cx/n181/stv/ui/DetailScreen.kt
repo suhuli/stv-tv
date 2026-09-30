@@ -91,9 +91,9 @@ fun DetailScreen(
             sourceConfig = source
             val loaded = container.macCmsClient.detail(source, videoId)
             detail = loaded
+            // 观看记录按片名只留一条：换了源打开同一部片，也能接着上次的集数/进度
             history = container.historyStore.find(sourceKey, videoId)
                 ?: container.historyStore.findByTitle(loaded.summary.title)
-                    ?.takeIf { it.sourceKey == sourceKey }
             selectedGroupIndex = history?.let { loaded.groupOf(it.episodeIndex) }
                 ?: preferredGroupIndex(loaded.playGroups)
         } catch (error: Exception) {

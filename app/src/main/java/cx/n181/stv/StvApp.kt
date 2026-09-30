@@ -11,6 +11,7 @@ import cx.n181.stv.data.HistoryStore
 import cx.n181.stv.data.HttpClients
 import cx.n181.stv.data.MacCmsClient
 import cx.n181.stv.data.MediaSearchRepository
+import cx.n181.stv.data.SourceHealthRepository
 import cx.n181.stv.data.SettingsRepository
 import cx.n181.stv.data.SuggestClient
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,10 @@ class StvApp : Application(), ImageLoaderFactory {
         // 启动时预热配置：后面进搜索/详情/播放页直接命中缓存，不再各自等网络
         container.appScope.launch {
             runCatching { container.appConfigRepository.load() }
+        }
+        // 网站每日巡检结果：搜索选源列表里标注「可播 / 海外受限 / 异常」
+        container.appScope.launch {
+            runCatching { container.sourceHealthRepository.load() }
         }
     }
 
@@ -66,4 +71,5 @@ class AppContainer(application: Application) {
     val doubanClient = DoubanClient("https://tv.181.cx/proxy/")
     val suggestClient = SuggestClient()
     val mediaSearchRepository = MediaSearchRepository(macCmsClient)
+    val sourceHealthRepository = SourceHealthRepository(application)
 }

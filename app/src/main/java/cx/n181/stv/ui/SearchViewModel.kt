@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import cx.n181.stv.AppContainer
 import cx.n181.stv.data.MediaSearchRepository
+import cx.n181.stv.data.SearchGroup
 import cx.n181.stv.data.SourceConfig
 import cx.n181.stv.data.SourceStatus
 import cx.n181.stv.data.VideoSummary
@@ -35,6 +36,8 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
     var initialized by mutableStateOf(false)
 
     val results = mutableStateListOf<VideoSummary>()
+    /** 按片名聚合后的结果，一部片一张卡 */
+    val groups = mutableStateListOf<SearchGroup>()
     val sourceStatuses = mutableStateMapOf<String, SourceStatus>()
 
     private val rawResults = mutableListOf<VideoSummary>()
@@ -75,6 +78,7 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
         searchJob?.cancel()
         rawResults.clear()
         results.clear()
+        groups.clear()
         sourceStatuses.clear()
         query = clean
         lastKeyword = clean
@@ -106,6 +110,9 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
                         val ranked = MediaSearchRepository.rank(clean, rawResults, order)
                         results.clear()
                         results.addAll(ranked)
+                        val grouped = MediaSearchRepository.group(ranked, order, container.sourceHealthRepository)
+                        groups.clear()
+                        groups.addAll(grouped)
                     }
                 }
             } finally {

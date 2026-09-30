@@ -108,3 +108,16 @@ sealed class SourceStatus {
     data class Done(val count: Int, val elapsedMs: Long) : SourceStatus()
     data class Failed(val reason: String, val elapsedMs: Long) : SourceStatus()
 }
+
+/** 搜索结果按片名聚合：同一部片在多个源的收录合成一组，一张卡。 */
+data class SearchGroup(
+    val normalizedTitle: String,
+    val items: List<VideoSummary>
+) {
+    val primary: VideoSummary get() = items.first()
+    val sourceCount: Int get() = items.map { it.sourceKey }.distinct().size
+    /** 海报优先取有图的那条 */
+    val poster: String? get() = items.firstOrNull { !it.poster.isNullOrBlank() }?.poster
+    /** 备注（更新至 X 集 / 全 N 集）取第一条非空的 */
+    val remarks: String? get() = items.firstOrNull { !it.remarks.isNullOrBlank() }?.remarks
+}
