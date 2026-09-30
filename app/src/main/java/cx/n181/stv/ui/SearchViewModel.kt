@@ -10,8 +10,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import cx.n181.stv.AppContainer
 import cx.n181.stv.data.MediaSearchRepository
-import cx.n181.stv.data.SearchGroup
-import cx.n181.stv.data.groupSearchResults
 import cx.n181.stv.data.SourceConfig
 import cx.n181.stv.data.SourceStatus
 import cx.n181.stv.data.VideoSummary
@@ -37,8 +35,6 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
     var initialized by mutableStateOf(false)
 
     val results = mutableStateListOf<VideoSummary>()
-    /** 按片名聚合后的结果：一部片一张卡，卡上显示「N 个源」，点进去用推荐源。 */
-    val groups = mutableStateListOf<SearchGroup>()
     val sourceStatuses = mutableStateMapOf<String, SourceStatus>()
 
     private val rawResults = mutableListOf<VideoSummary>()
@@ -60,10 +56,7 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
     suspend fun refreshSources() {
         val config = container.appConfigRepository.load()
         val disabled = container.settingsRepository.disabledSourceKeys.first()
-        runCatching { container.sourceHealthRepository.load() }
-        // 巡检判定「异常」的源不参与搜索（只会拖慢），可播的排前面
-        val active = container.sourceHealthRepository.filterForSearch(config.activeSources(disabled))
-        sources = container.sourceHealthRepository.sortByHealth(active, key = { it.key }, order = { it.order })
+        sources = config.activeSources(disabled)
     }
 
     /** 从首页带关键字进来时只自动搜一次，返回再进来不重复搜。 */
@@ -82,7 +75,6 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
         searchJob?.cancel()
         rawResults.clear()
         results.clear()
-        groups.clear()
         sourceStatuses.clear()
         query = clean
         lastKeyword = clean
@@ -114,16 +106,6 @@ class SearchViewModel(private val container: AppContainer) : ViewModel() {
                         val ranked = MediaSearchRepository.rank(clean, rawResults, order)
                         results.clear()
                         results.addAll(ranked)
-                        val grouped = groupSearchResults(
-                            keyword = clean,
-                            results = rawResults,
-                            sourceOrder = order,
-                            health = container.sourceHealthRepository,
-                            memory = container.playbackMemory
-                        )
-                        groups.clear()
-                        groups.addAll(grouped)
-                        container.searchGroupCache.put(grouped)
                     }
                 }
             } finally {

@@ -11,9 +11,6 @@ import cx.n181.stv.data.HistoryStore
 import cx.n181.stv.data.HttpClients
 import cx.n181.stv.data.MacCmsClient
 import cx.n181.stv.data.MediaSearchRepository
-import cx.n181.stv.data.PlaybackMemory
-import cx.n181.stv.data.SearchGroupCache
-import cx.n181.stv.data.SourceHealthRepository
 import cx.n181.stv.data.SettingsRepository
 import cx.n181.stv.data.SuggestClient
 import kotlinx.coroutines.CoroutineScope
@@ -31,11 +28,6 @@ class StvApp : Application(), ImageLoaderFactory {
         // 启动时预热配置：后面进搜索/详情/播放页直接命中缓存，不再各自等网络
         container.appScope.launch {
             runCatching { container.appConfigRepository.load() }
-        }
-        // 巡检数据 + 播放记忆一起预热：搜索聚合选源、自动换源都要同步读它们
-        container.appScope.launch {
-            runCatching { container.playbackMemory.warmUp() }
-            runCatching { container.sourceHealthRepository.load() }
         }
     }
 
@@ -74,7 +66,4 @@ class AppContainer(application: Application) {
     val doubanClient = DoubanClient("https://tv.181.cx/proxy/")
     val suggestClient = SuggestClient()
     val mediaSearchRepository = MediaSearchRepository(macCmsClient)
-    val sourceHealthRepository = SourceHealthRepository(application)
-    val playbackMemory = PlaybackMemory(application)
-    val searchGroupCache = SearchGroupCache()
 }

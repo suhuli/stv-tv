@@ -56,8 +56,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import cx.n181.stv.StvApp
 import cx.n181.stv.data.SourceStatus
-import cx.n181.stv.data.RecommendReason
-import cx.n181.stv.data.SearchGroup
+import cx.n181.stv.data.VideoSummary
 
 private val pinyinLetters = ('A'..'Z').map { it.toString() }
 private val digitKeys = ('0'..'9').map { it.toString() }
@@ -255,10 +254,9 @@ fun SearchScreen(
                             contentPadding = PaddingValues(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 24.dp),
                             modifier = Modifier.focusGroup()
                         ) {
-                            items(viewModel.groups, key = { it.normalizedTitle }) { group ->
-                                SearchResultCard(group) {
-                                    val pick = group.recommended
-                                    onOpenDetail(pick.sourceKey, pick.videoId)
+                            items(viewModel.results, key = { it.key }) { item ->
+                                SearchResultCard(item) {
+                                    onOpenDetail(item.sourceKey, item.videoId)
                                 }
                             }
                         }
@@ -279,8 +277,8 @@ private fun SearchStatusBar(viewModel: SearchViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = when {
-                    viewModel.isSearching -> "正在搜索  $finished / $total 个源  ·  已找到 ${viewModel.groups.size} 部（${viewModel.results.size} 条）"
-                    total > 0 -> "搜索完成  ${viewModel.groups.size} 部影片 · ${viewModel.results.size} 条结果 · $total 个源" +
+                    viewModel.isSearching -> "正在搜索  $finished / $total 个源  ·  已找到 ${viewModel.results.size} 条"
+                    total > 0 -> "搜索完成  ${viewModel.results.size} 条结果  ·  $total 个源" +
                         if (failed > 0) "（$failed 个源失败）" else ""
                     else -> "搜索结果"
                 },
@@ -366,10 +364,9 @@ private fun ActionKey(
 
 @Composable
 private fun SearchResultCard(
-    group: SearchGroup,
+    item: VideoSummary,
     onClick: () -> Unit
 ) {
-    val item = group.recommended
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(14.dp)
 
@@ -440,15 +437,10 @@ private fun SearchResultCard(
                 maxLines = 1
             )
             Text(
-                text = buildString {
-                    if (group.sourceCount > 1) append("${group.sourceCount} 个源 · ")
-                    append(item.sourceName)
-                    if (group.recommendReason != RecommendReason.NONE) append(" · ${group.recommendReason.label}")
-                },
+                text = item.sourceName,
                 color = TvFocusColor.copy(alpha = 0.9f),
                 fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                maxLines = 1
             )
         }
     }

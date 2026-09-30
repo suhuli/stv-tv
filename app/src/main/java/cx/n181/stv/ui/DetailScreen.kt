@@ -53,7 +53,6 @@ import cx.n181.stv.data.HistoryItem
 import cx.n181.stv.data.PlayGroup
 import cx.n181.stv.data.SourceConfig
 import cx.n181.stv.data.VideoDetail
-import cx.n181.stv.data.VideoSummary
 import cx.n181.stv.data.activeSources
 import cx.n181.stv.data.formatClock
 import kotlinx.coroutines.flow.first
@@ -63,7 +62,6 @@ fun DetailScreen(
     sourceKey: String,
     videoId: String,
     onPlay: (Int, Long) -> Unit,
-    onSwitchSource: (String, String) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -79,9 +77,6 @@ fun DetailScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var selectedGroupIndex by remember { mutableStateOf(0) }
     var reloadTick by remember { mutableStateOf(0) }
-    var alternatives by remember { mutableStateOf<List<VideoSummary>>(emptyList()) }
-    var watched by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    var healthLabel by remember { mutableStateOf("") }
 
     LaunchedEffect(sourceKey, videoId, reloadTick) {
         isLoading = true
@@ -101,10 +96,6 @@ fun DetailScreen(
                     ?.takeIf { it.sourceKey == sourceKey }
             selectedGroupIndex = history?.let { loaded.groupOf(it.episodeIndex) }
                 ?: preferredGroupIndex(loaded.playGroups)
-            watched = container.playbackMemory.watchedEpisodes(loaded.summary.title)
-            healthLabel = container.sourceHealthRepository.label(sourceKey)
-            // 同一部片在其它源的候选（来自最近一次搜索的聚合结果），用于详情页直接换源
-            alternatives = container.searchGroupCache.alternatives(loaded.summary.title, sourceKey)
         } catch (error: Exception) {
             errorMessage = error.message ?: "加载失败"
         } finally {
@@ -178,27 +169,6 @@ fun DetailScreen(
                             ) { Text("重试") }
                             TvOutlinedButton(onClick = onBack) { Text("返回") }
                         }
-                        // 详情拉不下来时，如果最近一次搜索里这部片还有别的源，直接列出来
-                        val others = remember(sourceKey, videoId) {
-                            container.searchGroupCache.alternativesBySource(sourceKey, videoId)
-                        }
-                        if (others.isNotEmpty()) {
-                            Spacer(Modifier.height(18.dp))
-                            Text("换个源试试：", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-                            Spacer(Modifier.height(8.dp))
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-                                modifier = Modifier.focusGroup()
-                            ) {
-                                items(others.size) { index ->
-                                    val item = others[index]
-                                    TvOutlinedButton(onClick = { onSwitchSource(item.sourceKey, item.videoId) }) {
-                                        Text("${item.sourceName} · ${container.sourceHealthRepository.label(item.sourceKey)}", fontSize = 14.sp)
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -216,15 +186,10 @@ fun DetailScreen(
                             detail = currentDetail,
                             source = currentSource,
                             history = history,
-                            watched = watched,
-                            healthLabel = healthLabel,
-                            alternatives = alternatives,
-                            healthLabelOf = { key -> container.sourceHealthRepository.label(key) },
                             selectedGroupIndex = selectedGroupIndex,
                             onSelectGroup = { selectedGroupIndex = it },
                             primaryActionFocus = primaryActionFocus,
-                            onPlay = onPlay,
-                            onSwitchSource = onSwitchSource
+                            onPlay = onPlay
                         )
                     }
                 }
@@ -238,15 +203,10 @@ private fun DetailContent(
     detail: VideoDetail,
     source: SourceConfig,
     history: HistoryItem?,
-    watched: Set<Int>,
-    healthLabel: String,
-    alternatives: List<VideoSummary>,
-    healthLabelOf: (String) -> String,
     selectedGroupIndex: Int,
     onSelectGroup: (Int) -> Unit,
     primaryActionFocus: FocusRequester,
-    onPlay: (Int, Long) -> Unit,
-    onSwitchSource: (String, String) -> Unit
+    onPlay: (Int, Long) -> Unit
 ) {
     val groups = detail.playGroups
     val currentGroup = groups.getOrNull(selectedGroupIndex)
@@ -294,18 +254,10 @@ private fun DetailContent(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = if (healthLabel.isNotBlank()) "来源：${source.name} · $healthLabel" else "来源：${source.name}",
+                text = "来源：${source.name}",
                 color = TvFocusColor.copy(alpha = 0.85f),
                 fontSize = 14.sp
             )
-            if (watched.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "已看 ${watched.size} 集",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp
-                )
-            }
         }
 
         Spacer(modifier = Modifier.width(36.dp))
@@ -374,43 +326,6 @@ private fun DetailContent(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 其它源：同一部片在别的源的收录（来自搜索聚合），按 上次可播 > 可播 > 其它 排好
-            if (alternatives.isNotEmpty()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "其它源",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp,
-                        modifier = Modifier.width(56.dp)
-                    )
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-                        modifier = Modifier.focusGroup()
-                    ) {
-                        items(alternatives.size) { index ->
-                            val item = alternatives[index]
-                            TvChip(
-                                onClick = { onSwitchSource(item.sourceKey, item.videoId) },
-                                selected = false
-                            ) {
-                                Text(
-                                    text = buildString {
-                                        append(item.sourceName)
-                                        append(" · ")
-                                        append(healthLabelOf(item.sourceKey))
-                                        item.remarks?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
-                                    },
-                                    fontSize = 14.sp,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
             // 线路
             if (groups.size > 1) {
                 LazyRow(
@@ -449,7 +364,6 @@ private fun DetailContent(
                 ) {
                     items(currentGroup.episodes, key = { it.index }) { episode ->
                         val isLastWatched = episode.index == resumeEpisode?.index
-                        val isWatched = episode.index in watched
                         TvOutlinedButton(
                             onClick = {
                                 val resumeAt = if (isLastWatched) history?.positionMs ?: 0L else 0L
@@ -460,11 +374,10 @@ private fun DetailContent(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = if (isWatched && !isLastWatched) "✓ ${episode.name}" else episode.name,
+                                text = episode.name,
                                 fontSize = 15.sp,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                color = if (isWatched && !isLastWatched) Color.White.copy(alpha = 0.55f) else Color.Unspecified
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
