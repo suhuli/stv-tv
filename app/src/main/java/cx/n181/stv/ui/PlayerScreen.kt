@@ -80,6 +80,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import cx.n181.stv.StvApp
 import cx.n181.stv.data.Episode
+import cx.n181.stv.data.HealthStatus
 import cx.n181.stv.data.HistoryItem
 import cx.n181.stv.data.HttpClients
 import cx.n181.stv.data.PlayerConfig
@@ -90,6 +91,7 @@ import cx.n181.stv.data.VideoSummary
 import cx.n181.stv.data.activeSources
 import cx.n181.stv.data.formatClock
 import cx.n181.stv.data.normalizeTitle
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -100,6 +102,16 @@ import tv.danmaku.ijk.media.player.IjkMediaPlayer
 
 private const val CONTROLS_HIDE_DELAY_MS = 5_000L
 private const val PROGRESS_SAVE_INTERVAL_MS = 5_000L
+/** 松开方向键后多久真正执行 seek（期间连续按键只移动预览位置，不反复请求分片） */
+private const val SEEK_COMMIT_DELAY_MS = 550L
+/** seek 完成后预览条再停留多久 */
+private const val SEEK_OVERLAY_LINGER_MS = 900L
+/** 起播卡住多久算失败（换内核/换源） */
+private const val START_STALL_TIMEOUT_MS = 30_000L
+/** 一次播放会话里最多自动换几次源 */
+private const val MAX_AUTO_SOURCE_SWITCHES = 3
+/** 看到这个比例就算「已看」 */
+private const val WATCHED_RATIO = 0.9f
 private const val SPEED_OPTIONS_LABEL = "倍速"
 private val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
 
@@ -164,6 +176,19 @@ fun PlayerScreen(
     var altLoading by remember { mutableStateOf(false) }
     var altMessage by remember { mutableStateOf<String?>(null) }
 
+    // ---- 快进/快退预览（市面电视播放器的交互：按键只移动预览位置，松手后才真正 seek）----
+    var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
+    var seekDirection by remember { mutableStateOf(0) }
+    var seekCommitJob by remember { mutableStateOf<Job?>(null) }
+
+    // ---- 自动换源 ----
+    var autoSwitchCount by remember { mutableStateOf(0) }
+    var triedSourceKeys by remember { mutableStateOf<Set<String>>(setOf(sourceKey)) }
+    var hasRenderedThisEpisode by remember { mutableStateOf(false) }
+    var goodSourceRecorded by remember { mutableStateOf(false) }
+    var watchedMarkedIndex by remember { mutableStateOf(-1) }
+    var watchedSet by remember { mutableStateOf<Set<Int>>(emptySet()) }
+
     val episodes = detail?.allEpisodes.orEmpty()
     val currentEpisode = detail?.episodeAt(currentEpisodeIndex)
     val hasPrevious = episodes.any { it.index == currentEpisodeIndex - 1 }
@@ -218,9 +243,25 @@ fun PlayerScreen(
         container.appScope.launch { container.historyStore.saveHistory(item) }
     }
 
+    /** 看到 90% 以上就记为已看（和网站 watchedEpisodes 一致） */
+    fun markWatchedIfNeeded(index: Int, position: Long, duration: Long, force: Boolean = false) {
+        if (watchedMarkedIndex == index) return
+        val title = detail?.summary?.title ?: return
+        if (!force && (duration <= 0 || position < duration * WATCHED_RATIO)) return
+        watchedMarkedIndex = index
+        watchedSet = watchedSet + index
+        container.appScope.launch { container.playbackMemory.markWatched(title, index) }
+    }
+
     fun playEpisode(index: Int, position: Long = 0L) {
         if (detail?.episodeAt(index) == null) return
-        if (index != currentEpisodeIndex) persistProgress()
+        if (index != currentEpisodeIndex) {
+            persistProgress()
+            markWatchedIfNeeded(currentEpisodeIndex, positionMs, durationMs)
+        }
+        hasRenderedThisEpisode = false
+        seekCommitJob?.cancel()
+        seekPreviewMs = null
         errorMessage = null
         altResults = emptyList()
         altMessage = null
@@ -234,6 +275,7 @@ fun PlayerScreen(
     }
 
     fun onEpisodeEnded() {
+        markWatchedIfNeeded(currentEpisodeIndex, positionMs, durationMs, force = true)
         val next = episodes.firstOrNull { it.index == currentEpisodeIndex + 1 }
         if (playerConfig.autoNext && next != null) {
             // 当前集记为已看完（进度 0，指向下一集）
@@ -248,21 +290,39 @@ fun PlayerScreen(
         }
     }
 
-    fun onEngineFailed(engine: PlayerEngine, reason: String) {
+    // 自动换源在下面定义（依赖搜索），这里用一个可变引用提前占位
+    val autoSwitchRef = remember { arrayOfNulls<(String) -> Unit>(1) }
+
+    /**
+     * 内核失败处理：
+     * - 网络/源侧错误（404、超时、m3u8 拉不到）换内核没用，直接换源；
+     * - 解码/格式错误才按 Exo → IJK → 系统 逐个试。
+     */
+    fun onEngineFailed(engine: PlayerEngine, reason: String, sourceSideError: Boolean = false) {
         val tried = attemptedEngines + engine
         attemptedEngines = tried
         val next = PlayerEngine.entries.firstOrNull { it !in tried }
         val resumeAt = videoEngine?.takeIf { it.isReady }?.currentPosition ?: positionMs
-        if (next != null) {
+        if (next != null && !sourceSideError) {
             showInfo("${engine.label} 播放失败，自动切换到 ${next.label}")
             pendingStartPosition = resumeAt
             isBuffering = true
             sessionEngine = next
-        } else {
-            errorMessage = "$reason\n已依次尝试 ExoPlayer / IJKPlayer / 系统播放器，建议换源"
-            isBuffering = false
-            wakeControls()
+            return
         }
+        val autoSwitch = autoSwitchRef[0]
+        if (autoSwitch != null && autoSwitchCount < MAX_AUTO_SOURCE_SWITCHES) {
+            pendingStartPosition = resumeAt
+            autoSwitch(reason)
+            return
+        }
+        errorMessage = if (sourceSideError) {
+            "$reason\n这个源的片源拉不到，请换源"
+        } else {
+            "$reason\n已依次尝试 ExoPlayer / IJKPlayer / 系统播放器，建议换源"
+        }
+        isBuffering = false
+        wakeControls()
     }
 
     fun switchEngineManually(engine: PlayerEngine) {
@@ -296,6 +356,53 @@ fun PlayerScreen(
         wakeControls()
     }
 
+    /** 长按加速：前 5 下按 1 倍步长，之后 2 倍、4 倍、8 倍（10s 步长时最快 80s/下） */
+    fun seekStepFor(repeatCount: Int): Long = when {
+        repeatCount < 5 -> seekStepMs
+        repeatCount < 15 -> seekStepMs * 2
+        repeatCount < 30 -> seekStepMs * 4
+        else -> seekStepMs * 8
+    }
+
+    fun commitSeek() {
+        val target = seekPreviewMs ?: return
+        val engine = videoEngine
+        if (engine != null && engine.isReady) {
+            engine.seekTo(target)
+            positionMs = target
+        }
+        seekCommitJob?.cancel()
+        seekCommitJob = scope.launch {
+            delay(SEEK_OVERLAY_LINGER_MS)
+            if (seekPreviewMs == target) {
+                seekPreviewMs = null
+                seekDirection = 0
+            }
+        }
+    }
+
+    /**
+     * 方向键快进/快退：只移动预览位置并显示进度条，松手 SEEK_COMMIT_DELAY_MS 后才真正 seek。
+     * 旧实现每按一下就 seek 一次并弹出控制条，第二下就变成在按钮间移动焦点了。
+     */
+    fun previewSeek(direction: Int, repeatCount: Int, multiplier: Int = 1) {
+        val engine = videoEngine ?: return
+        if (!engine.isReady) return
+        val duration = engine.duration
+        val base = seekPreviewMs ?: engine.currentPosition
+        val step = seekStepFor(repeatCount) * multiplier
+        val raw = base + direction * step
+        val maxPosition = if (duration > 0) (duration - 1_000L).coerceAtLeast(0L) else Long.MAX_VALUE
+        seekPreviewMs = raw.coerceIn(0L, maxPosition)
+        seekDirection = direction
+        interactionTick += 1
+        seekCommitJob?.cancel()
+        seekCommitJob = scope.launch {
+            delay(SEEK_COMMIT_DELAY_MS)
+            commitSeek()
+        }
+    }
+
     fun setSpeed(speed: Float) {
         playbackSpeed = speed
         videoEngine?.setSpeed(speed)
@@ -308,6 +415,40 @@ fun PlayerScreen(
         pendingStartPosition = positionMs
         isBuffering = true
         if (detail == null) detailReloadTick += 1 else reloadTick += 1
+    }
+
+    /** 候选源排序：上次可播 > 巡检可播（延迟低优先）> 未巡检 > 海外受限 > 异常；本次已失败过的源排最后 */
+    fun rankAlternatives(title: String, items: List<VideoSummary>): List<VideoSummary> {
+        val health = container.sourceHealthRepository
+        val lastGood = container.playbackMemory.lastGoodSource(title)
+        val order = allSources.withIndex().associate { it.value.key to it.index }
+        return items.sortedWith(
+            compareBy<VideoSummary> { if (it.sourceKey in triedSourceKeys) 1 else 0 }
+                .thenBy { if (lastGood != null && it.sourceKey == lastGood.sourceKey) 0 else 1 }
+                .thenBy { health.status(it.sourceKey).rank }
+                .thenBy { health.latency(it.sourceKey) }
+                .thenBy { order[it.sourceKey] ?: Int.MAX_VALUE }
+        )
+    }
+
+    /** 同一部片在其它源的候选：优先用搜索页已经聚合好的结果（零网络），没有再现搜 */
+    suspend fun collectAlternatives(title: String): List<VideoSummary> {
+        val cached = container.searchGroupCache.alternatives(title, activeSourceKey)
+            .filter { it.sourceKey !in triedSourceKeys }
+        if (cached.isNotEmpty()) return rankAlternatives(title, cached)
+        val target = normalizeTitle(title)
+        val found = runCatching {
+            container.mediaSearchRepository.search(
+                keyword = title,
+                sources = container.sourceHealthRepository.filterForSearch(
+                    allSources.filter { it.key != activeSourceKey && it.key !in triedSourceKeys }
+                ),
+                maxConcurrent = 8
+            )
+        }.getOrDefault(emptyList())
+        val exact = found.filter { normalizeTitle(it.title) == target }
+        val loose = found.filter { normalizeTitle(it.title).contains(target) && normalizeTitle(it.title) != target }
+        return rankAlternatives(title, (exact + loose).distinctBy { it.key })
     }
 
     fun findAlternatives() {
@@ -328,7 +469,7 @@ fun PlayerScreen(
             }.getOrDefault(emptyList())
             val exact = found.filter { normalizeTitle(it.title) == target }
             val loose = found.filter { normalizeTitle(it.title).contains(target) && normalizeTitle(it.title) != target }
-            val merged = (exact + loose).distinctBy { it.key }.take(12)
+            val merged = rankAlternatives(title, (exact + loose).distinctBy { it.key }).take(12)
             altResults = merged
             altMessage = if (merged.isEmpty()) "其它源里没有找到《$title》" else null
             altLoading = false
@@ -338,6 +479,11 @@ fun PlayerScreen(
     fun switchToAlternative(item: VideoSummary) {
         persistProgress()
         val resumeAt = videoEngine?.takeIf { it.isReady }?.currentPosition ?: positionMs
+        triedSourceKeys = triedSourceKeys + activeSourceKey + item.sourceKey
+        hasRenderedThisEpisode = false
+        goodSourceRecorded = false
+        seekCommitJob?.cancel()
+        seekPreviewMs = null
         altResults = emptyList()
         altMessage = null
         errorMessage = null
@@ -350,6 +496,40 @@ fun PlayerScreen(
         activeVideoId = item.videoId
         showInfo("正在切换到 ${item.sourceName}")
     }
+
+    /**
+     * 自动换源（对应网站的 auto换源）：当前源播不了时，在同一部片的其它源里
+     * 按 上次可播 > 巡检可播 > 其它 的顺序自动切到下一个，保留集数和进度；最多 3 次。
+     */
+    fun autoSwitchSource(reason: String) {
+        val title = detail?.summary?.title
+        if (title == null || altLoading) {
+            errorMessage = reason
+            isBuffering = false
+            wakeControls()
+            return
+        }
+        scope.launch {
+            altLoading = true
+            altMessage = null
+            isBuffering = true
+            showInfo("${sourceConfig?.name ?: "当前源"} 播放失败，正在自动换源…")
+            val candidates = collectAlternatives(title).filter { it.sourceKey !in triedSourceKeys }
+            altLoading = false
+            val pick = candidates.firstOrNull()
+            if (pick == null) {
+                errorMessage = "$reason\n其它源里也没有找到《$title》"
+                isBuffering = false
+                wakeControls()
+                return@launch
+            }
+            autoSwitchCount += 1
+            val healthLabel = container.sourceHealthRepository.label(pick.sourceKey)
+            switchToAlternative(pick)
+            showInfo("已自动切换到 ${pick.sourceName}（$healthLabel），从当前进度继续")
+        }
+    }
+    autoSwitchRef[0] = { reason -> autoSwitchSource(reason) }
 
     // ------------------------------------------------------------------
     // 数据加载
@@ -381,9 +561,27 @@ fun PlayerScreen(
             if (target != desiredEpisodeIndex) pendingStartPosition = 0L
             currentEpisodeIndex = target
             attemptedEngines = emptySet()
+            watchedSet = container.playbackMemory.watchedEpisodes(loaded.summary.title)
+            watchedMarkedIndex = -1
             detail = loaded
         } catch (error: Exception) {
-            errorMessage = error.message ?: "加载失败"
+            val message = error.message ?: "加载失败"
+            // 详情拉不到 / 没有剧集：同样走自动换源（需要知道片名，取上一份 detail 或搜索缓存里的）
+            val knownTitle = detail?.summary?.title
+                ?: container.searchGroupCache.alternativesBySource(activeSourceKey, activeVideoId).firstOrNull()?.title
+            if (knownTitle != null && autoSwitchCount < MAX_AUTO_SOURCE_SWITCHES) {
+                val candidates = container.searchGroupCache.alternativesBySource(activeSourceKey, activeVideoId)
+                    .filter { it.sourceKey !in triedSourceKeys }
+                val pick = rankAlternatives(knownTitle, candidates).firstOrNull()
+                if (pick != null) {
+                    autoSwitchCount += 1
+                    showInfo("${sourceConfig?.name ?: "当前源"} 加载失败，已自动切换到 ${pick.sourceName}")
+                    detailLoading = false
+                    switchToAlternative(pick)
+                    return@LaunchedEffect
+                }
+            }
+            errorMessage = message
             isBuffering = false
         } finally {
             detailLoading = false
@@ -482,7 +680,12 @@ fun PlayerScreen(
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
-                            onEngineFailed(PlayerEngine.EXO, "ExoPlayer 无法播放（${error.errorCodeName}）")
+                            // 2xxx = IO 类错误（网络、404/403、m3u8 拉不到），换内核没意义，直接换源
+                            val code = error.errorCode
+                            val sourceSide = code in PlaybackException.ERROR_CODE_IO_UNSPECIFIED..PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED ||
+                                code == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
+                                code == PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED
+                            onEngineFailed(PlayerEngine.EXO, "ExoPlayer 无法播放（${error.errorCodeName}）", sourceSideError = sourceSide && !hasRenderedThisEpisode)
                         }
                     })
 
@@ -602,11 +805,40 @@ fun PlayerScreen(
         while (isActive) {
             val engine = videoEngine
             if (engine != null && engine.isReady) {
-                positionMs = engine.currentPosition
+                val position = engine.currentPosition
+                if (seekPreviewMs == null) positionMs = position
                 durationMs = engine.duration
                 isPlaying = engine.isPlaying
+                if (engine.isPlaying && position > 2_000L) {
+                    hasRenderedThisEpisode = true
+                    // 真正播出画面了：记住这部片在这个源可播（下次搜索聚合 / 自动换源优先）
+                    if (!goodSourceRecorded) {
+                        goodSourceRecorded = true
+                        val currentDetail = detail
+                        if (currentDetail != null) {
+                            container.appScope.launch {
+                                container.playbackMemory.rememberGoodSource(
+                                    currentDetail.summary.title,
+                                    currentDetail.summary.sourceKey,
+                                    currentDetail.summary.videoId
+                                )
+                            }
+                        }
+                    }
+                    markWatchedIfNeeded(currentEpisodeIndex, position, engine.duration)
+                }
             }
             delay(500L)
+        }
+    }
+
+    // 起播看门狗：内核建好后 30 秒还没出画面，按「源侧失败」处理（直接换源，不再逐个试内核）
+    LaunchedEffect(videoEngine, currentEpisodeIndex, sessionEngine) {
+        val engine = videoEngine ?: return@LaunchedEffect
+        delay(START_STALL_TIMEOUT_MS)
+        if (videoEngine === engine && !hasRenderedThisEpisode && isBuffering && errorMessage == null) {
+            val currentEngine = sessionEngine ?: return@LaunchedEffect
+            onEngineFailed(currentEngine, "${currentEngine.label} 起播超时", sourceSideError = true)
         }
     }
 
@@ -694,8 +926,14 @@ fun PlayerScreen(
     // ------------------------------------------------------------------
     // 返回键：先关面板 → 再隐藏控制条 → 最后退出
     // ------------------------------------------------------------------
-    BackHandler(enabled = altResults.isNotEmpty() || altLoading || (controlsVisible && isPlaying && errorMessage == null)) {
+    BackHandler(enabled = seekPreviewMs != null || altResults.isNotEmpty() || altLoading || (controlsVisible && isPlaying && errorMessage == null)) {
         when {
+            seekPreviewMs != null -> {
+                // 取消预览，不 seek
+                seekCommitJob?.cancel()
+                seekPreviewMs = null
+                seekDirection = 0
+            }
             altResults.isNotEmpty() || altLoading -> {
                 altResults = emptyList()
                 altMessage = null
@@ -728,11 +966,11 @@ fun PlayerScreen(
                 true
             }
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                if (isDown) seekBy(seekStepMs * 3)
+                if (isDown) previewSeek(1, native.repeatCount, multiplier = 3)
                 true
             }
             KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                if (isDown) seekBy(-seekStepMs * 3)
+                if (isDown) previewSeek(-1, native.repeatCount, multiplier = 3)
                 true
             }
             KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_CHANNEL_UP -> {
@@ -751,17 +989,25 @@ fun PlayerScreen(
             }
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A -> {
-                if (hidden) {
-                    if (isDown && native.repeatCount == 0) togglePlay()
-                    true
-                } else {
-                    if (isDown) interactionTick += 1
-                    false
+                when {
+                    // 预览中按确定：立刻跳到预览位置
+                    seekPreviewMs != null -> {
+                        if (isDown && native.repeatCount == 0) commitSeek()
+                        true
+                    }
+                    hidden -> {
+                        if (isDown && native.repeatCount == 0) togglePlay()
+                        true
+                    }
+                    else -> {
+                        if (isDown) interactionTick += 1
+                        false
+                    }
                 }
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                if (hidden) {
-                    if (isDown) seekBy(-seekStepMs)
+                if (hidden || seekPreviewMs != null) {
+                    if (isDown) previewSeek(-1, native.repeatCount)
                     true
                 } else {
                     if (isDown) interactionTick += 1
@@ -769,8 +1015,8 @@ fun PlayerScreen(
                 }
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                if (hidden) {
-                    if (isDown) seekBy(seekStepMs)
+                if (hidden || seekPreviewMs != null) {
+                    if (isDown) previewSeek(1, native.repeatCount)
                     true
                 } else {
                     if (isDown) interactionTick += 1
@@ -778,12 +1024,23 @@ fun PlayerScreen(
                 }
             }
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
-                if (hidden) {
-                    if (isDown) wakeControls()
-                    true
-                } else {
-                    if (isDown) interactionTick += 1
-                    false
+                when {
+                    // 预览中按上下：先把 seek 落实，再呼出控制条
+                    seekPreviewMs != null -> {
+                        if (isDown && native.repeatCount == 0) {
+                            commitSeek()
+                            wakeControls()
+                        }
+                        true
+                    }
+                    hidden -> {
+                        if (isDown) wakeControls()
+                        true
+                    }
+                    else -> {
+                        if (isDown) interactionTick += 1
+                        false
+                    }
                 }
             }
             else -> {
@@ -886,6 +1143,19 @@ fun PlayerScreen(
             }
         }
 
+        // 快进/快退预览条（控制条隐藏时按左右键出现）
+        val previewTarget = seekPreviewMs
+        if (previewTarget != null && !controlsVisible) {
+            SeekPreviewOverlay(
+                targetMs = previewTarget,
+                currentMs = positionMs,
+                durationMs = durationMs,
+                direction = seekDirection,
+                episodeName = currentEpisode?.name,
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
         // 控制层
         if (controlsVisible) {
             PlayerControls(
@@ -903,6 +1173,7 @@ fun PlayerScreen(
                 hasNext = hasNext,
                 episodes = episodes,
                 currentEpisodeIndex = currentEpisodeIndex,
+                watchedEpisodes = watchedSet,
                 playbackSpeed = playbackSpeed,
                 sessionEngine = sessionEngine,
                 seekStepSeconds = (seekStepMs / 1000).toInt(),
@@ -986,7 +1257,22 @@ fun PlayerScreen(
                             modifier = if (item == altResults.firstOrNull()) Modifier.focusRequester(altFocus) else Modifier
                         ) {
                             Column {
-                                Text(item.sourceName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = buildString {
+                                        append(item.sourceName)
+                                        append("  ")
+                                        append(container.sourceHealthRepository.label(item.sourceKey))
+                                        if (item.sourceKey == container.playbackMemory.lastGoodSource(detail?.summary?.title)?.sourceKey) append("  上次可播")
+                                    },
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = when (container.sourceHealthRepository.status(item.sourceKey)) {
+                                        HealthStatus.OK -> Color(0xFF6EE7B7)
+                                        HealthStatus.DOWN -> Color(0xFFF87171)
+                                        HealthStatus.API_ONLY -> Color(0xFFFCD34D)
+                                        HealthStatus.UNKNOWN -> Color.White
+                                    }
+                                )
                                 Text(
                                     text = listOfNotNull(item.remarks, item.year).joinToString(" · ").ifBlank { item.title },
                                     fontSize = 12.sp,
@@ -1022,6 +1308,7 @@ private fun PlayerControls(
     hasNext: Boolean,
     episodes: List<Episode>,
     currentEpisodeIndex: Int,
+    watchedEpisodes: Set<Int>,
     playbackSpeed: Float,
     sessionEngine: PlayerEngine?,
     seekStepSeconds: Int,
@@ -1099,11 +1386,17 @@ private fun PlayerControls(
                     modifier = Modifier.focusGroup()
                 ) {
                     items(episodes, key = { it.index }) { episode ->
+                        val watched = episode.index in watchedEpisodes && episode.index != currentEpisodeIndex
                         TvChip(
                             onClick = { onSelectEpisode(episode.index) },
                             selected = episode.index == currentEpisodeIndex
                         ) {
-                            Text(episode.name, fontSize = 14.sp, maxLines = 1)
+                            Text(
+                                text = if (watched) "✓ ${episode.name}" else episode.name,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                color = if (watched) Color.White.copy(alpha = 0.55f) else Color.Unspecified
+                            )
                         }
                     }
                 }
@@ -1187,6 +1480,83 @@ private fun PlayerControls(
             }
         }
     }
+}
+
+/**
+ * 快进/快退预览条：大号时间 + 进度条 + 方向提示。
+ * 位置只在松手后真正 seek，所以这里显示的是「目标位置」，播放画面暂时不动。
+ */
+@Composable
+private fun SeekPreviewOverlay(
+    targetMs: Long,
+    currentMs: Long,
+    durationMs: Long,
+    direction: Int,
+    episodeName: String?,
+    modifier: Modifier = Modifier
+) {
+    val delta = targetMs - currentMs
+    val deltaSeconds = (delta / 1000L)
+    val deltaText = when {
+        deltaSeconds > 0 -> "快进 +${formatDelta(deltaSeconds)}"
+        deltaSeconds < 0 -> "快退 -${formatDelta(-deltaSeconds)}"
+        else -> if (direction >= 0) "快进" else "快退"
+    }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
+            .padding(horizontal = 40.dp, vertical = 26.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = formatClock(targetMs),
+                color = Color.White,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "  /  " + (if (durationMs > 0) formatClock(durationMs) else "--:--"),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 20.sp
+            )
+            Spacer(Modifier.width(24.dp))
+            Surface(color = TvFocusColor.copy(alpha = 0.25f), shape = RoundedCornerShape(8.dp)) {
+                Text(
+                    text = deltaText,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            episodeName?.let {
+                Text(text = it, color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp, maxLines = 1)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        LinearProgressIndicator(
+            progress = { if (durationMs > 0) (targetMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp),
+            color = TvFocusColor,
+            trackColor = Color.White.copy(alpha = 0.25f)
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "松开后自动跳转 · 确定键立即跳转 · 返回键取消",
+            color = Color.White.copy(alpha = 0.5f),
+            fontSize = 13.sp
+        )
+    }
+}
+
+private fun formatDelta(seconds: Long): String {
+    if (seconds < 60) return "${seconds}s"
+    val minutes = seconds / 60
+    val rest = seconds % 60
+    return if (rest == 0L) "${minutes}分" else "${minutes}分${rest}s"
 }
 
 private fun guessMimeType(url: String): String? {

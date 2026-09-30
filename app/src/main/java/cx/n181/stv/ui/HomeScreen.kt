@@ -57,9 +57,10 @@ private val movieTags = listOf(
     "韩国", "日本", "动作", "喜剧", "爱情", "科幻", "悬疑", "恐怖", "治愈"
 )
 
+// 顺序和网站保持一致：热门后面紧跟综艺
 private val tvTags = listOf(
-    "热门", "美剧", "英剧", "韩剧", "日剧", "国产剧", "港剧",
-    "日本动画", "综艺", "纪录片"
+    "热门", "综艺", "美剧", "英剧", "韩剧", "日剧", "国产剧", "港剧",
+    "日本动画", "纪录片"
 )
 
 @Composable
@@ -167,7 +168,7 @@ fun HomeScreen(
                         NavPill("电影", active = false) {
                             scope.launch { listState.animateScrollToItem(3 + sectionOffset) }
                         }
-                        NavPill("剧集", active = false) {
+                        NavPill("电视剧", active = false) {
                             scope.launch { listState.animateScrollToItem(6 + sectionOffset) }
                         }
                         NavPill("搜索", active = false) { onOpenSearch() }
@@ -235,7 +236,7 @@ fun HomeScreen(
                 )
             }
 
-            item(key = "tv-header") { SectionHeader("剧集", "豆瓣 · $tvTag") }
+            item(key = "tv-header") { SectionHeader("电视剧", "豆瓣 · $tvTag") }
 
             item(key = "tv-tags") {
                 LazyRow(

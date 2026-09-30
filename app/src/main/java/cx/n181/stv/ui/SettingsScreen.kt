@@ -40,6 +40,7 @@ import cx.n181.stv.BuildConfig
 import cx.n181.stv.StvApp
 import cx.n181.stv.data.AppConfigRepository
 import cx.n181.stv.data.PlayerEngine
+import cx.n181.stv.data.HealthStatus
 import cx.n181.stv.data.SourceConfig
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -76,6 +77,8 @@ fun SettingsScreen(
 
     val sources: List<SourceConfig> = configState?.config?.sources.orEmpty()
     val enabledCount = sources.count { it.enabled && it.key !in disabledKeys }
+    val healthReport by container.sourceHealthRepository.state.collectAsState()
+    LaunchedEffect(Unit) { runCatching { container.sourceHealthRepository.load() } }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -186,13 +189,26 @@ fun SettingsScreen(
                                 }
                             }
                         ) { Text("清空搜索记录") }
+                        TvOutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    container.playbackMemory.clearAll()
+                                    message = "已清空「上次可播」和已看集数记忆"
+                                }
+                            }
+                        ) { Text("清空播放记忆") }
                     }
                 }
 
                 item(key = "sources-title") {
+                    val report = healthReport
                     SectionTitle(
                         "资源源（$enabledCount / ${sources.size} 启用）",
-                        "关闭长期失败或很慢的源可以明显加快搜索；按 确定 键切换"
+                        if (report != null) {
+                            "巡检：${report.healthy} 可播 · ${report.api_only} 海外受限 · ${report.down} 异常（${healthTime(report.generated_at)}）；异常源搜索时自动跳过；按 确定 键切换"
+                        } else {
+                            "关闭长期失败或很慢的源可以明显加快搜索；按 确定 键切换"
+                        }
                     )
                 }
 
@@ -213,6 +229,8 @@ fun SettingsScreen(
                         source = source,
                         enabled = effectiveEnabled,
                         lockedOff = !source.enabled,
+                        healthLabel = if (healthReport != null) container.sourceHealthRepository.label(source.key) else "",
+                        healthStatus = container.sourceHealthRepository.status(source.key),
                         onToggle = {
                             if (!source.enabled) return@SourceRow
                             scope.launch {
@@ -226,7 +244,7 @@ fun SettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     SectionTitle("关于", "私人TV Android TV 客户端  v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                     Text(
-                        text = "遥控器快捷键：播放中按 确定 播放/暂停，左右快退/快进，上下呼出控制条，菜单键显示/隐藏控制条，返回键先关闭控制条再退出。",
+                        text = "遥控器快捷键：播放中按 确定 播放/暂停；左右键快退/快进（松手后跳转，长按加速，确定键立即跳转，返回键取消）；上下呼出控制条；菜单键显示/隐藏控制条；返回键先关闭控制条再退出。",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
@@ -261,6 +279,8 @@ private fun SourceRow(
     source: SourceConfig,
     enabled: Boolean,
     lockedOff: Boolean,
+    healthLabel: String,
+    healthStatus: HealthStatus,
     onToggle: () -> Unit
 ) {
     TvOutlinedButton(
@@ -292,6 +312,21 @@ private fun SourceRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        if (healthLabel.isNotBlank()) {
+            Text(
+                text = healthLabel,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = when (healthStatus) {
+                    HealthStatus.OK -> Color(0xFF6EE7B7)
+                    HealthStatus.API_ONLY -> Color(0xFFFCD34D)
+                    HealthStatus.DOWN -> Color(0xFFF87171)
+                    HealthStatus.UNKNOWN -> Color.White.copy(alpha = 0.5f)
+                },
+                modifier = Modifier.width(120.dp),
+                maxLines = 1
+            )
+        }
         Text(
             text = when {
                 lockedOff -> "配置已停用"
@@ -307,6 +342,18 @@ private fun SourceRow(
             }
         )
     }
+}
+
+private fun healthTime(generatedAt: String?): String {
+    if (generatedAt.isNullOrBlank()) return "时间未知"
+    // minSdk 23 没有 java.time，用 SimpleDateFormat 解析 ISO 时间（巡检脚本输出形如 2026-09-29T22:47:00.666Z）
+    return runCatching {
+        val parser = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        val date = parser.parse(generatedAt.take(19)) ?: return generatedAt.take(16)
+        java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(date)
+    }.getOrDefault(generatedAt.take(16))
 }
 
 private fun configDescription(loaded: AppConfigRepository.Loaded?): String {

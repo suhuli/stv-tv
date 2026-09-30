@@ -80,6 +80,13 @@ fun AppNavHost() {
                 onPlay = { episodeIndex, startPositionMs ->
                     openPlayer(sourceKey, videoId, episodeIndex, startPositionMs)
                 },
+                onSwitchSource = { newSourceKey, newVideoId ->
+                    // 详情页换源：替换当前详情页，返回键直接回搜索结果，不会在多个源的详情页之间来回
+                    navController.navigate("detail/${Uri.encode(newSourceKey)}/${Uri.encode(newVideoId)}") {
+                        popUpTo("detail/{sourceKey}/{videoId}") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
                 onBack = { navController.popBackStack() }
             )
         }
