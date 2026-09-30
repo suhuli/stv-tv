@@ -58,8 +58,8 @@ private val movieTags = listOf(
 )
 
 private val tvTags = listOf(
-    "热门", "美剧", "英剧", "韩剧", "日剧", "国产剧", "港剧",
-    "日本动画", "综艺", "纪录片"
+    "热门", "综艺", "美剧", "英剧", "韩剧", "日剧", "国产剧", "港剧",
+    "日本动画", "纪录片"
 )
 
 @Composable
@@ -164,10 +164,10 @@ fun HomeScreen(
                         NavPill("首页", active = true, modifier = Modifier.focusRequester(homePillFocus)) {
                             scope.launch { listState.animateScrollToItem(0) }
                         }
-                        NavPill("电影", active = false) {
+                        NavPill("电视剧", active = false) {
                             scope.launch { listState.animateScrollToItem(3 + sectionOffset) }
                         }
-                        NavPill("剧集", active = false) {
+                        NavPill("电影", active = false) {
                             scope.launch { listState.animateScrollToItem(6 + sectionOffset) }
                         }
                         NavPill("搜索", active = false) { onOpenSearch() }
@@ -211,6 +211,30 @@ fun HomeScreen(
                 }
             }
 
+            item(key = "tv-header") { SectionHeader("电视剧", "豆瓣 · $tvTag") }
+
+            item(key = "tv-tags") {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+                    modifier = Modifier.focusGroup()
+                ) {
+                    items(tvTags) { tag ->
+                        TagChip(tag, tvTag == tag) { tvTag = tag }
+                    }
+                }
+            }
+
+            item(key = "tv-row") {
+                RecommendRow(
+                    loading = tvLoading,
+                    error = tvError,
+                    items = tvItems,
+                    imageUrl = { container.doubanClient.proxyImageUrl(it.cover) },
+                    onClick = { onSearchTitle(it.title) }
+                )
+            }
+
             item(key = "movie-header") { SectionHeader("电影", "豆瓣 · $movieTag") }
 
             item(key = "movie-tags") {
@@ -230,30 +254,6 @@ fun HomeScreen(
                     loading = movieLoading,
                     error = movieError,
                     items = movieItems,
-                    imageUrl = { container.doubanClient.proxyImageUrl(it.cover) },
-                    onClick = { onSearchTitle(it.title) }
-                )
-            }
-
-            item(key = "tv-header") { SectionHeader("剧集", "豆瓣 · $tvTag") }
-
-            item(key = "tv-tags") {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-                    modifier = Modifier.focusGroup()
-                ) {
-                    items(tvTags) { tag ->
-                        TagChip(tag, tvTag == tag) { tvTag = tag }
-                    }
-                }
-            }
-
-            item(key = "tv-row") {
-                RecommendRow(
-                    loading = tvLoading,
-                    error = tvError,
-                    items = tvItems,
                     imageUrl = { container.doubanClient.proxyImageUrl(it.cover) },
                     onClick = { onSearchTitle(it.title) }
                 )
